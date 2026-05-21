@@ -1,0 +1,30 @@
+# =============================================================================
+# Bundle B — Serverless API Backend
+# Example variable values. Copy this file to terraform.tfvars and edit.
+#
+# Only app_name is required. All other variables have sensible defaults.
+# =============================================================================
+
+# Required: your application name (lowercase, alphanumeric, max 16 chars)
+# app_name = "myapibackend"
+
+# Optional: deployment environment (dev, staging, production)
+# environment = "dev"
+
+# Optional: Azure region
+# location = "swedencentral"
+
+# Optional: Functions runtime (node, python, dotnet)
+# functions_runtime = "node"
+
+# Optional: API rate limit (calls per minute per subscription key)
+# rate_limit_per_minute = 60
+
+# Optional: Cosmos DB max throughput (RU/s)
+# cosmos_db_max_throughput = 1000
+
+# Optional: enable Application Insights monitoring
+# enable_monitoring = true
+
+# Optional: additional resource tags
+# tags = {}

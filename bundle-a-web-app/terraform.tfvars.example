@@ -1,0 +1,64 @@
+# =============================================================================
+# Bundle A — Example Variable Values
+# Copy this file to terraform.tfvars and edit the values.
+#
+# Only app_name is required. All other variables have sensible defaults.
+# =============================================================================
+
+# Required: your application name (lowercase, alphanumeric, max 16 chars)
+app_name = "mywebapp"
+
+# Optional: deployment environment (dev, staging, production)
+# Controls NAT Gateway configuration and monthly cost.
+# Default: "dev"
+environment = "dev"
+
+# Optional: compute size (small, medium, large)
+# small  = 0.5 vCPU / 1 GB RAM  (~€10-15/month)
+# medium = 1 vCPU   / 2 GB RAM  (~€20-30/month)
+# large  = 2 vCPU   / 4 GB RAM  (~€40-60/month)
+# Default: "small"
+instance_size = "small"
+
+# Optional: PostgreSQL server SKU
+# B_Standard_B1ms  = 1 vCPU / 2 GB  (~€15/month, good for dev and low traffic)
+# B_Standard_B2ms  = 2 vCPU / 4 GB  (~€30/month, small production)
+# GP_Standard_D2s_v3 = 2 vCPU / 8 GB (~€120/month, moderate production)
+# Default: "B_Standard_B1ms"
+db_instance_class = "B_Standard_B1ms"
+
+# Optional: your Docker container image
+# Use "nginx:latest" for initial testing.
+# For your own app: provide an ACR URL or public Docker Hub image.
+# Default: "nginx:latest"
+container_image = "nginx:latest"
+
+# Optional: port your container listens on
+# Default: 80
+container_port = 80
+
+# Optional: create Blob Storage for static assets and file uploads
+# Only enable if your application needs to store files.
+# Default: false
+enable_storage = false
+
+# Optional: create Log Analytics Workspace and monitoring dashboard
+# Recommended: leave enabled so logs exist when debugging problems.
+# Default: true
+enable_monitoring = true
+
+# Optional: Azure region
+# swedencentral is recommended for Finnish/Nordic SMEs (lowest latency).
+# Default: "swedencentral"
+location = "swedencentral"
+
+# Optional: high availability NAT Gateway (production only)
+# Only relevant when environment = "production".
+# false = 1 NAT Gateway (cost-conscious, acceptable for most SMEs)
+# true  = 1 NAT Gateway per AZ (full HA, adds ~€30-40/month)
+# Default: false
+high_availability = false
+
+# Required only when environment = "production" AND high_availability = false.
+# Set to true to confirm you accept the single-AZ NAT Gateway availability risk.
+# acknowledge_single_nat = true

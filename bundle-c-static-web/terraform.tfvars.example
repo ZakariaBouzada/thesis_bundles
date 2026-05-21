@@ -1,0 +1,28 @@
+# =============================================================================
+# Bundle C — Example Variable Values
+# Copy this file to terraform.tfvars and edit the values.
+#
+# This is the simplest bundle — only app_name is required.
+# Deployment takes approximately 2-3 minutes.
+# =============================================================================
+
+# Required: your application name (lowercase, alphanumeric, max 16 chars)
+app_name = "mysite"
+
+# Optional: deployment environment (dev, staging, production)
+# Default: "dev"
+# environment = "dev"
+
+# Optional: Azure region
+# Default: "swedencentral"
+# location = "swedencentral"
+
+# Optional: custom domain (e.g. "www.mycompany.com")
+# Requires DNS configuration after deployment — see README for instructions.
+# Leave commented to use the free azurestaticapps.net URL.
+# Default: null (no custom domain)
+# custom_domain = "www.mycompany.com"
+
+# Optional: enable Application Insights page view tracking
+# Default: true
+# enable_monitoring = true

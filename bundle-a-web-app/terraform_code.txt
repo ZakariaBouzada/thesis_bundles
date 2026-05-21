@@ -1,0 +1,650 @@
+# =============================================================================
+# Module: Networking/main.tf in D:\bundle-a-web-app\files\main.tf
+#
+# Creates the VNet, subnets, and conditional NAT Gateways.
+#
+# RQ2 (Abstraction): The SME user never configures any of these resources
+# directly. The VNet CIDR, subnet layout, and NAT Gateway count are all
+# determined by the bundle. The user only selects 'environment' and
+# 'high_availability'. See Design Decision 5, Chapter 4.
+#
+# Architecture:
+#   VNet: 10.0.0.0/16
+#   ├── AZ-1 public  subnet: 10.0.1.0/24  (Application Gateway)
+#   ├── AZ-1 private subnet: 10.0.11.0/24 (Container Instances)
+#   ├── AZ-1 db      subnet: 10.0.21.0/24 (PostgreSQL — delegated)
+#   ├── AZ-2 public  subnet: 10.0.2.0/24
+#   ├── AZ-2 private subnet: 10.0.12.0/24
+#   └── AZ-2 db      subnet: 10.0.22.0/24
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Virtual Network
+# -----------------------------------------------------------------------------
+resource "azurerm_virtual_network" "main" {
+  name                = "${var.name_prefix}-vnet"
+  location            = var.location
+  resource_group_name = var.resource_group
+  address_space       = ["10.0.0.0/16"]
+  tags                = var.tags
+}
+
+# -----------------------------------------------------------------------------
+# Public Subnets — Application Gateway lives here
+# -----------------------------------------------------------------------------
+resource "azurerm_subnet" "public" {
+  count                = 2
+  name                 = "${var.name_prefix}-public-${count.index + 1}"
+  resource_group_name  = var.resource_group
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = ["10.0.${count.index + 1}.0/24"]
+}
+
+# -----------------------------------------------------------------------------
+# Private Subnets — Container Instances live here
+# No direct inbound internet access. Outbound only via NAT Gateway (if present).
+#
+# RQ2 (Abstraction): Subnet delegation for ACI is a technical Azure requirement
+# hidden from the user. The bundle handles it automatically.
+# -----------------------------------------------------------------------------
+resource "azurerm_subnet" "private" {
+  count                = 2
+  name                 = "${var.name_prefix}-private-${count.index + 1}"
+  resource_group_name  = var.resource_group
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = ["10.0.${count.index + 11}.0/24"]
+
+  delegation {
+    name = "aci-delegation"
+    service_delegation {
+      name    = "Microsoft.ContainerInstance/containerGroups"
+      actions = ["Microsoft.Network/virtualNetworks/subnets/action"]
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Database Subnets — PostgreSQL Flexible Server lives here
+# Delegated to PostgreSQL service (Azure requirement).
+# -----------------------------------------------------------------------------
+resource "azurerm_subnet" "database" {
+  count                = 2
+  name                 = "${var.name_prefix}-db-${count.index + 1}"
+  resource_group_name  = var.resource_group
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = ["10.0.${count.index + 21}.0/24"]
+
+  delegation {
+    name = "postgresql-delegation"
+    service_delegation {
+      name    = "Microsoft.DBforPostgreSQL/flexibleServers"
+      actions = ["Microsoft.Network/virtualNetworks/subnets/join/action"]
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# NAT Gateway Public IPs
+# One IP per NAT Gateway. Count determined by environment and high_availability.
+#
+# RQ2 (Parameterisation): nat_gateway_count comes from the root module local.
+# This module does not know about 'environment' or 'high_availability' directly
+# — it only receives the computed count. Clear module interface.
+# -----------------------------------------------------------------------------
+resource "azurerm_public_ip" "nat" {
+  count               = var.nat_gateway_count
+  name                = "${var.name_prefix}-nat-pip-${count.index + 1}"
+  location            = var.location
+  resource_group_name = var.resource_group
+  allocation_method   = "Static"
+  sku                 = "Standard"
+  zones               = [tostring(count.index + 1)]
+  tags                = var.tags
+}
+
+# -----------------------------------------------------------------------------
+# NAT Gateways (conditional)
+#
+# dev/staging:          0 NAT Gateways — saves ~€30-70/month
+# production (default): 1 NAT Gateway  — cost-conscious production
+# production (HA):      2 NAT Gateways — one per AZ, full availability
+#
+# WARNING: dev/staging containers cannot reach the public internet at runtime.
+# All dependencies must be bundled into the container image at build time.
+# AWS services are accessible via Service Endpoints (provisioned below).
+# -----------------------------------------------------------------------------
+resource "azurerm_nat_gateway" "main" {
+  count               = var.nat_gateway_count
+  name                = "${var.name_prefix}-nat-${count.index + 1}"
+  location            = var.location
+  resource_group_name = var.resource_group
+  sku_name            = "Standard"
+  zones               = [tostring(count.index + 1)]
+  tags                = var.tags
+}
+
+resource "azurerm_nat_gateway_public_ip_association" "main" {
+  count                = var.nat_gateway_count
+  nat_gateway_id       = azurerm_nat_gateway.main[count.index].id
+  public_ip_address_id = azurerm_public_ip.nat[count.index].id
+}
+
+# Associate NAT Gateways with private subnets.
+# If 1 NAT Gateway: both private subnets share it (index 0 for both).
+# If 2 NAT Gateways: each private subnet gets its own (index matches).
+resource "azurerm_subnet_nat_gateway_association" "private" {
+  count          = var.nat_gateway_count > 0 ? 2 : 0
+  subnet_id      = azurerm_subnet.private[count.index].id
+  nat_gateway_id = azurerm_nat_gateway.main[min(count.index, var.nat_gateway_count - 1)].id
+}
+
+# -----------------------------------------------------------------------------
+# Network Security Group — Private Subnets
+#
+# RQ2 (Abstraction): Security rules are hidden from the user.
+# Rules: port 80 inbound (HTTP from load balancer/internet),
+#        port 5432 inbound (PostgreSQL from containers within VNet),
+#        no port 22 anywhere (no VMs in this bundle).
+# See Design Decision (Security), Chapter 4.
+#
+# Note: Port 80 was missing in the initial deployment and had to be added
+# manually via CLI. It is now codified here permanently so that
+# terraform destroy + terraform apply produces a correct deployment
+# without any manual intervention. See Phase 3, Error 7 in deployment docs.
+# -----------------------------------------------------------------------------
+resource "azurerm_network_security_group" "private" {
+  name                = "${var.name_prefix}-private-nsg"
+  location            = var.location
+  resource_group_name = var.resource_group
+  tags                = var.tags
+
+  security_rule {
+    name                       = "allow-http-inbound"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "80"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+
+  security_rule {
+    name                       = "allow-postgresql-inbound"
+    priority                   = 200
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "5432"
+    source_address_prefix      = "10.0.0.0/16"
+    destination_address_prefix = "*"
+  }
+
+  security_rule {
+    name                       = "deny-all-other-inbound"
+    priority                   = 4096
+    direction                  = "Inbound"
+    access                     = "Deny"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+}
+
+resource "azurerm_subnet_network_security_group_association" "private" {
+  count                     = 2
+  subnet_id                 = azurerm_subnet.private[count.index].id
+  network_security_group_id = azurerm_network_security_group.private.id
+}
+
+# -----------------------------------------------------------------------------
+# Private DNS Zone — PostgreSQL Flexible Server requires private DNS
+# -----------------------------------------------------------------------------
+resource "azurerm_private_dns_zone" "postgresql" {
+  name                = "${var.name_prefix}.postgres.database.azure.com"
+  resource_group_name = var.resource_group
+  tags                = var.tags
+}
+
+resource "azurerm_private_dns_zone_virtual_network_link" "postgresql" {
+  name                  = "${var.name_prefix}-dns-link"
+  private_dns_zone_name = azurerm_private_dns_zone.postgresql.name
+  virtual_network_id    = azurerm_virtual_network.main.id
+  resource_group_name   = var.resource_group
+  tags                  = var.tags
+}
+
+D:\bundle-a-web-app\files\outputs.tf
+
+output "app_url" {
+  description = "Public HTTPS URL of the Container App. Open in browser to verify deployment."
+  value       = "https://${azurerm_container_app.app.latest_revision_fqdn}"
+}
+
+output "container_app_id" {
+  description = "Container App resource ID."
+  value       = azurerm_container_app.app.id
+}
+
+output "container_app_fqdn" {
+  description = "Container App FQDN (without protocol prefix)."
+  value       = azurerm_container_app.app.latest_revision_fqdn
+}
+
+D:\bundle-a-web-app\files\variables.tf
+
+variable "name_prefix"         { type = string }
+variable "location"            { type = string }
+variable "resource_group"      { type = string }
+variable "container_image"     { type = string }
+variable "container_port"      { type = number }
+variable "cpu_cores"           { type = number }
+variable "memory_in_gb"        { type = number }
+variable "managed_identity_id" { type = string }
+variable "db_secret_id"        { type = string }
+variable "tags"                { type = map(string) }
+
+# Container Apps handles its own networking — subnet_id no longer needed.
+# Log Analytics workspace ID is required for the Container Apps Environment.
+variable "log_analytics_workspace_id" {
+  type        = string
+  description = "Log Analytics Workspace ID. Required for Container Apps Environment log routing."
+}
+D:\bundle-a-web-app\files\mnt\user-data\outputs\bundle-a-web-app\modules\main.tf 
+# =============================================================================
+# Bundle A — Web Application Stack
+# Root Module: Orchestration
+#
+# This file wires together all child modules. It is intentionally thin —
+# business logic lives in the modules, not here.
+#
+# RQ2 (Modularisation): Each module has a single responsibility. Dependencies
+# flow in one direction: networking → security → database/loadbalancer →
+# compute → storage/monitoring. See Chapter 4, Section 4.1.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Locals: shared computed values used across modules
+# RQ2 (Abstraction): All naming, tagging, and size-mapping logic is centralised
+# here so modules receive concrete values and do not need to re-derive them.
+# -----------------------------------------------------------------------------
+locals {
+  # Naming prefix applied to every Azure resource.
+  # Pattern: {app_name}-{environment} (e.g. myapp-production)
+  name_prefix = "${var.app_name}-${var.environment}"
+
+  # Standard tags applied to every resource in the bundle.
+  # Enables cost tracking and resource attribution in the Azure portal.
+  common_tags = {
+    Application = var.app_name
+    Environment = var.environment
+    ManagedBy   = "Terraform"
+    Bundle      = "bundle-a-web-app"
+  }
+
+  # RQ2 (Abstraction): Named size → Azure Container Instances CPU/memory mapping.
+  # The SME user selects "small", "medium", or "large".
+  # The bundle translates this into Azure-specific values.
+  # See Design Decision 4, Chapter 4.
+  instance_size_map = {
+    small  = { cpu = 0.5, memory = 1.0 }
+    medium = { cpu = 1.0, memory = 2.0 }
+    large  = { cpu = 2.0, memory = 4.0 }
+  }
+
+  cpu_cores   = local.instance_size_map[var.instance_size].cpu
+  memory_in_gb = local.instance_size_map[var.instance_size].memory
+
+  # RQ2 (Parameterisation): NAT Gateway count derived from environment and
+  # high_availability flag. The SME user never specifies a NAT count directly.
+  # See Design Decision 5, Chapter 4.
+  nat_gateway_count = (
+    var.environment == "production" && var.high_availability == true  ? 2 :
+    var.environment == "production" && var.high_availability == false ? 1 :
+    0  # dev and staging: no NAT Gateway, eliminates ~€30-70/month cost
+  )
+}
+
+# -----------------------------------------------------------------------------
+# Precondition: Production + single NAT Gateway availability warning.
+# RQ2 (Parameterisation): Surfaces a trade-off the SME user should consciously
+# accept rather than discover during an outage. See Design Decision 5.
+#
+# The user must explicitly set acknowledge_single_nat = true in tfvars to
+# proceed with production + high_availability = false. This forces a conscious
+# decision rather than a silent default. See Chapter 4, Section 4.7.
+# -----------------------------------------------------------------------------
+resource "terraform_data" "ha_warning" {
+  count = var.environment == "production" && var.high_availability == false ? 1 : 0
+
+  lifecycle {
+    precondition {
+      condition     = var.acknowledge_single_nat == true
+      error_message = <<-EOT
+        PRODUCTION RISK: You are deploying to production with high_availability = false.
+        A single NAT Gateway will be deployed in Availability Zone 1 only.
+        If AZ-1 fails, outbound internet connectivity from private subnets
+        will be interrupted until the AZ recovers.
+
+        To proceed, add this to your terraform.tfvars:
+          acknowledge_single_nat = true
+
+        To remove this risk entirely, set:
+          high_availability = true  (adds approximately EUR 30-40/month)
+      EOT
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Data: current Azure client configuration (used for Key Vault access policies)
+# -----------------------------------------------------------------------------
+data "azurerm_client_config" "current" {}
+
+# -----------------------------------------------------------------------------
+# Resource Group: single container for all bundle resources.
+# One resource group per deployment enables clean teardown with one command.
+# -----------------------------------------------------------------------------
+resource "azurerm_resource_group" "main" {
+  name     = "${local.name_prefix}-rg"
+  location = var.location
+  tags     = local.common_tags
+}
+
+# -----------------------------------------------------------------------------
+# Module: Networking
+# Creates VNet, subnets, Internet Gateway, and conditional NAT Gateways.
+# -----------------------------------------------------------------------------
+module "networking" {
+  source = "./modules/networking"
+
+  name_prefix       = local.name_prefix
+  location          = var.location
+  resource_group    = azurerm_resource_group.main.name
+  nat_gateway_count = local.nat_gateway_count
+  environment       = var.environment
+  tags              = local.common_tags
+}
+
+# -----------------------------------------------------------------------------
+# Module: Security
+# Creates Managed Identity for ACI and Key Vault access policies.
+# -----------------------------------------------------------------------------
+module "security" {
+  source = "./modules/security"
+
+  name_prefix    = local.name_prefix
+  location       = var.location
+  resource_group = azurerm_resource_group.main.name
+  tags           = local.common_tags
+}
+
+# -----------------------------------------------------------------------------
+# Module: Database
+# Creates PostgreSQL Flexible Server and stores credentials in Key Vault.
+# -----------------------------------------------------------------------------
+module "database" {
+  source = "./modules/database"
+
+  name_prefix       = local.name_prefix
+  location          = var.location
+  resource_group    = azurerm_resource_group.main.name
+  db_instance_class = var.db_instance_class
+  db_subnet_id      = module.networking.db_subnet_id
+  key_vault_id      = module.security.key_vault_id
+  tags              = local.common_tags
+
+  depends_on = [module.networking, module.security]
+}
+
+# NOTE: loadbalancer module removed.
+# Azure Container Apps provides a managed HTTP ingress controller natively.
+# The SME user gets a public HTTPS URL without any load balancer configuration.
+# See compute module and Chapter 4, Section 4.7 for the design decision.
+
+# -----------------------------------------------------------------------------
+# Module: Compute
+# Creates Azure Container App with managed HTTP ingress.
+# Replaces ACI + Load Balancer combination (ACI cannot be a LB backend target).
+# See Phase 3, Error 6 in deployment documentation and Chapter 4, Section 4.7.
+# -----------------------------------------------------------------------------
+module "compute" {
+  source = "./modules/compute"
+
+  name_prefix         = local.name_prefix
+  location            = var.location
+  resource_group      = azurerm_resource_group.main.name
+  container_image     = var.container_image
+  container_port      = var.container_port
+  cpu_cores           = local.cpu_cores
+  memory_in_gb        = local.memory_in_gb
+  managed_identity_id = module.security.managed_identity_id
+  db_secret_id        = module.database.db_secret_id
+  # Container Apps Environment requires Log Analytics — make monitoring mandatory
+  # when compute is deployed. If enable_monitoring = false, create a minimal
+  # workspace just for the environment (cost: negligible).
+  log_analytics_workspace_id = var.enable_monitoring ? module.monitoring[0].workspace_id : azurerm_log_analytics_workspace.fallback[0].workspace_id
+  tags                = local.common_tags
+
+  depends_on = [module.security, module.database]
+}
+
+# Fallback Log Analytics Workspace when enable_monitoring = false.
+# Container Apps Environment requires a workspace — this provides a minimal one.
+resource "azurerm_log_analytics_workspace" "fallback" {
+  count               = var.enable_monitoring ? 0 : 1
+  name                = "${local.name_prefix}-logs-minimal"
+  location            = var.location
+  resource_group_name = azurerm_resource_group.main.name
+  sku                 = "PerGB2018"
+  retention_in_days   = 30
+  tags                = local.common_tags
+}
+
+# -----------------------------------------------------------------------------
+# Module: Storage (conditional)
+# RQ2 (Parameterisation): Only created when enable_storage = true.
+# Avoids unnecessary resource sprawl for applications that do not need
+# file storage. See Design Decision 8, Chapter 4.
+# -----------------------------------------------------------------------------
+module "storage" {
+  source = "./modules/storage"
+  count  = var.enable_storage ? 1 : 0
+
+  name_prefix         = local.name_prefix
+  location            = var.location
+  resource_group      = azurerm_resource_group.main.name
+  managed_identity_id = module.security.managed_identity_id
+  tags                = local.common_tags
+
+  depends_on = [module.security]
+}
+
+# -----------------------------------------------------------------------------
+# Module: Monitoring (conditional)
+# RQ2 (Parameterisation): Dashboard only created when enable_monitoring = true.
+# Log Analytics Workspace itself is always created when monitoring is enabled,
+# so that compute logs have somewhere to go from day one.
+# See Design Decision 9, Chapter 4.
+# -----------------------------------------------------------------------------
+module "monitoring" {
+  source = "./modules/monitoring"
+  count  = var.enable_monitoring ? 1 : 0
+
+  name_prefix    = local.name_prefix
+  location       = var.location
+  resource_group = azurerm_resource_group.main.name
+  app_name       = var.app_name
+  environment    = var.environment
+  tags           = local.common_tags
+}
+D:\bundle-a-web-app\files\mnt\user-data\outputs\bundle-a-web-app\modules\outputs.tf
+# =============================================================================
+# Bundle A — Root Module Outputs
+#
+# These are the values the SME user needs after deployment.
+# Sensitive values (passwords) are NEVER exposed here.
+# The database secret ID allows retrieval via Azure CLI without
+# exposing the credential itself.
+# =============================================================================
+
+output "app_url" {
+  description = "Public HTTPS URL of your application. Open this in a browser to verify deployment."
+  value       = module.compute.app_url
+}
+
+output "container_app_fqdn" {
+  description = "Container App FQDN (without https://)."
+  value       = module.compute.container_app_fqdn
+}
+
+output "database_endpoint" {
+  description = "PostgreSQL Flexible Server hostname. Use this in your application's database connection string."
+  value       = module.database.db_endpoint
+}
+
+output "database_secret_id" {
+  description = <<-EOT
+    Azure Key Vault secret ID containing the database credentials.
+    Retrieve with:
+      az keyvault secret show --id "<this value>" --query value -o tsv
+    Never store the password in plain text or commit it to source control.
+  EOT
+  value       = module.database.db_secret_id
+}
+
+output "storage_account_name" {
+  description = "Name of the Azure Blob Storage account for static assets. Only present when enable_storage = true."
+  value       = var.enable_storage ? module.storage[0].storage_account_name : "Storage not enabled (set enable_storage = true)"
+}
+
+output "log_analytics_workspace_id" {
+  description = "Log Analytics Workspace ID for querying container and database logs. Only present when enable_monitoring = true."
+  value       = var.enable_monitoring ? module.monitoring[0].workspace_id : "Monitoring not enabled (set enable_monitoring = true)"
+}
+
+output "resource_group_name" {
+  description = "Azure Resource Group containing all bundle resources. Use this name to find resources in the Azure Portal."
+  value       = azurerm_resource_group.main.name
+}
+
+output "deployment_summary" {
+  description = "Human-readable summary of what was deployed and estimated monthly cost tier."
+  value = <<-EOT
+    =============================================
+    Bundle A — Web Application Stack
+    =============================================
+    Application : ${var.app_name}
+    Environment : ${var.environment}
+    Region      : ${var.location}
+    Compute     : ${var.instance_size} (${local.cpu_cores} vCPU / ${local.memory_in_gb} GB)
+    Database    : ${var.db_instance_class}
+    NAT Gateways: ${local.nat_gateway_count}
+    Storage     : ${var.enable_storage ? "enabled" : "disabled"}
+    Monitoring  : ${var.enable_monitoring ? "enabled" : "disabled"}
+    =============================================
+    App URL     : ${module.compute.app_url}
+    DB Endpoint : ${module.database.db_endpoint}
+    =============================================
+  EOT
+}
+
+D:\bundle-a-web-app\files\mnt\user-data\outputs\bundle-a-web-app\modules\compute\main.tf
+# =============================================================================
+# Module: Compute
+#
+# Creates an Azure Container App running the user's container image.
+#
+# RQ2 (Abstraction): Switched from Azure Container Instances (ACI) to
+# Azure Container Apps. ACI cannot integrate with Azure Load Balancer
+# (discovered during Phase 3, Error 6). Container Apps provides a managed
+# HTTP ingress controller natively — the SME user gets a working HTTPS URL
+# without configuring any load balancer, certificates, or networking rules.
+#
+# This change also removes the entire loadbalancer/ module from the bundle —
+# ingress is now handled internally by the Container Apps environment.
+# See Chapter 4, Section 4.7 (Design Trade-offs).
+#
+# RQ2 (Delimitation): Bundle does not provision Azure Container Registry.
+# User supplies a pre-built image URL. See Design Decision 10, Chapter 4.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Container Apps Environment
+# The managed environment handles networking, ingress, and log routing.
+# One environment can host multiple Container Apps (not exposed to SME user).
+# -----------------------------------------------------------------------------
+resource "azurerm_container_app_environment" "main" {
+  name                       = "${var.name_prefix}-cae"
+  location                   = var.location
+  resource_group_name        = var.resource_group
+  log_analytics_workspace_id = var.log_analytics_workspace_id
+  tags                       = var.tags
+}
+
+# -----------------------------------------------------------------------------
+# Container App
+#
+# RQ2 (Abstraction): The SME user specifies container_image, container_port,
+# and instance_size. All Container Apps configuration (scaling rules, revision
+# mode, ingress settings) is opinionated and hidden.
+# -----------------------------------------------------------------------------
+resource "azurerm_container_app" "app" {
+  name                         = "${var.name_prefix}-app"
+  container_app_environment_id = azurerm_container_app_environment.main.id
+  resource_group_name          = var.resource_group
+  revision_mode                = "Single"
+  tags                         = var.tags
+
+  # Managed Identity: authenticates to Key Vault and Storage without
+  # credentials in environment variables.
+  identity {
+    type         = "UserAssigned"
+    identity_ids = [var.managed_identity_id]
+  }
+
+  # Ingress: external HTTP access managed by Container Apps platform.
+  # The SME user gets a working public URL with no load balancer config.
+  ingress {
+    external_enabled = true
+    target_port      = var.container_port
+    transport        = "http"
+
+    traffic_weight {
+      percentage      = 100
+      latest_revision = true
+    }
+  }
+
+  template {
+    min_replicas = 1
+    max_replicas = 3  # Basic auto-scaling: hidden from user, sensible default
+
+    container {
+      name   = "app"
+      image  = var.container_image
+      cpu    = var.cpu_cores
+      memory = "${var.memory_in_gb}Gi"
+
+      # DB secret location passed as environment variable.
+      # Container reads actual password from Key Vault using Managed Identity.
+      env {
+        name  = "DB_SECRET_ID"
+        value = var.db_secret_id
+      }
+
+      env {
+        name  = "PORT"
+        value = tostring(var.container_port)
+      }
+    }
+  }
+}
+
+
+
+

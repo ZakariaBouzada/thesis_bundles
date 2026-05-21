@@ -1,0 +1,20 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.tfvars
+
+# Large binaries and temp files
+*.exe
+*.log
+*.bak
+
+# IDE files
+.idea/
+.vscode/
+
+# Test content (portfolio copies)
+**/portfolio/
+**/container-portfolio/
