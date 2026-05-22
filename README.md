@@ -150,11 +150,9 @@ All bundles follow three design principles grounded in the thesis research quest
 ### Academic Context
 This repository is an artefact produced for the Master's thesis:
 
-Design and Evaluation of Reusable Infrastructure-as-Code Bundles for Small and Medium Enterprises
+***Design and Evaluation of Reusable Infrastructure-as-Code Bundles for Small and Medium Enterprises***
 
-Åbo Akademi University, Faculty of Science and Engineering, Information Technologies
-
-2025
+Åbo Akademi University, Faculty of Science and Engineering, Information Technologies, 2026
 
 The thesis examines:
 
