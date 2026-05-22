@@ -6,8 +6,6 @@ This repository contains three Terraform bundles developed as part of a Master's
 
 **Author:** Zakaria Bouzada
 
-**Supervisor:** Adnan Ashraf
-
 ---
 
 ## Overview
