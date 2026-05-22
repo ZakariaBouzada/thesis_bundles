@@ -68,7 +68,7 @@ terraform init
 terraform plan
 terraform apply
 ```
-Deploy Bundle C (Static Website)
+## Deploy Bundle C (Static Website)
 ```bash
 cd ../bundle-c-static-web
 cp terraform.tfvars.example terraform.tfvars
