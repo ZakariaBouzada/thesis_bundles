@@ -30,18 +30,38 @@ Only `app_name` is required. All other parameters have sensible defaults.
 | Azure CLI | >= 2.50.0 | [aka.ms/install-azure-cli](https://aka.ms/install-azure-cli) |
 | Azure subscription | Free credits available | [azure.microsoft.com/free](https://azure.microsoft.com/free) |
 
-### Azure Authentication
+> ⚠️ **Cost Warning:** Azure requires a credit card for verification. You receive €200 free credits for 30 days. **Always run `terraform destroy` after testing** to avoid unexpected charges.
+
+## Authentication
+
+### Option 1: Quick Test (Recommended for first-time users)
+
+Log in with your personal Azure account. Terraform will use these credentials automatically.
 
 ```bash
 az login
 az account show --query id -o tsv
 ```
-## Service Principal for Terraform (Required for CI/CD)
+
+### Option 2: Service Principal for Terraform (For CI/CD pipelines or team use)
+
 ```bash
 az ad sp create-for-rbac --name "terraform-bundles" --role Contributor --scopes /subscriptions/<SUBSCRIPTION_ID>
 ```
-Save the JSON output (appId, password, tenant).
+Save the JSON output (appId, password, tenant). Then set the following environment variables before running Terraform:
 
+```bash
+# Linux / Mac / Git Bash:
+export ARM_CLIENT_ID=<appId>
+export ARM_CLIENT_SECRET=<password>
+export ARM_TENANT_ID=<tenant>
+export ARM_SUBSCRIPTION_ID=<subscription_id>
+
+# Windows Command Prompt:
+set ARM_CLIENT_ID=<appId>
+...
+```
+  
 ## Quick Start
 Clone the Repository
 ```bash
@@ -52,31 +72,49 @@ cd thesis_bundles
 ```bash
 cd bundle-a-web-app
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars — set app_name only
+# Edit terraform.tfvars — set app_name only, to your choosing (e.g. "my-test-site")
 terraform init
 terraform plan
 terraform apply
+# Type 'yes' when prompted
 ```
-After deployment completes, Terraform outputs the application URL. Open it in a browser.
 
 ## Deploy Bundle B (Serverless API)
 ```bash
-cd ../bundle-b-serverless-api
+cd bundle-b-serverless-api
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars — set app_name only
+# Edit terraform.tfvars — set app_name only, to your choosing (e.g. "my-test-site")
 terraform init
 terraform plan
 terraform apply
+# Type 'yes' when prompted
 ```
-## Deploy Bundle C (Static Website)
+## Deploy Bundle C (Static Website) (Recommended for testing)
 ```bash
-cd ../bundle-c-static-web
+cd bundle-c-static-web
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars — set app_name only
+# Edit terraform.tfvars — set app_name only, to your choosing (e.g. "my-test-site")
 terraform init
 terraform plan
 terraform apply
+# Type 'yes' when prompted
 ```
+## Output
+After deployment completes, Terraform outputs the application URL. Open it in a browser.
+Or, 
+```bash
+terraform output
+terraform output app_url        # Bundle A and B
+terraform output site_url       # Bundle C
+```
+
+## **Destroy your resources**
+```bash
+# After testing, destroy resources from the same bundle directory:
+cd bundle-c-static-web   # or bundle-a-web-app, bundle-b-serverless-api
+terraform destroy
+```
+
 ## Repository Structure
 ```bash
 thesis_bundles/
